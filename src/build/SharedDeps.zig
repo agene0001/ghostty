@@ -470,6 +470,15 @@ pub fn add(
         }
     }
 
+    // Windows system libraries
+    if (step.rootModuleTarget().os.tag == .windows) {
+        if (self.config.renderer == .opengl) {
+            step.linkSystemLibrary("opengl32");
+        }
+        step.linkSystemLibrary("gdi32");
+        step.linkSystemLibrary("user32");
+    }
+
     // cimgui
     if (b.lazyDependency("dcimgui", .{
         .target = target,
@@ -542,6 +551,7 @@ pub fn add(
         switch (self.config.app_runtime) {
             .none => {},
             .gtk => try self.addGtkNg(step),
+            .win32 => {},
         }
     }
 

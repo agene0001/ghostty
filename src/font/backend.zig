@@ -40,6 +40,9 @@ pub const Backend = enum {
             };
         }
 
+        // Windows uses FreeType without fontconfig (no native font discovery yet).
+        if (target.os.tag == .windows) return .freetype;
+
         // macOS also supports "coretext_freetype" but there is no scenario
         // that is the default. It is only used by people who want to
         // self-compile Ghostty and prefer the freetype aesthetic.

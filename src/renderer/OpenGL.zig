@@ -169,6 +169,10 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
         apprt.gtk,
         => try prepareContext(null),
 
+        // Win32 uses WGL; the context must already be current.
+        // GLAD's built-in loader handles wglGetProcAddress + opengl32.dll.
+        apprt.win32 => try prepareContext(null),
+
         apprt.embedded => {
             // TODO(mitchellh): this does nothing today to allow libghostty
             // to compile for OpenGL targets but libghostty is strictly
@@ -196,7 +200,6 @@ pub fn finalizeSurfaceInit(self: *const OpenGL, surface: *apprt.Surface) !void {
 /// Callback called by renderer.Thread when it begins.
 pub fn threadEnter(self: *const OpenGL, surface: *apprt.Surface) !void {
     _ = self;
-    _ = surface;
 
     switch (apprt.runtime) {
         else => @compileError("unsupported app runtime for OpenGL"),
@@ -206,6 +209,12 @@ pub fn threadEnter(self: *const OpenGL, surface: *apprt.Surface) !void {
             // tell, so we use the renderer thread to setup all the state
             // but then do the actual draws and texture syncs and all that
             // on the main thread. As such, we don't do anything here.
+        },
+
+        apprt.win32 => {
+            // Win32: make the WGL context current on the renderer thread.
+            // The main thread must have released it before this point.
+            surface.makeContextCurrent();
         },
 
         apprt.embedded => {
@@ -226,6 +235,12 @@ pub fn threadExit(self: *const OpenGL) void {
         apprt.gtk => {
             // We don't need to do any unloading for GTK because we may
             // be sharing the global bindings with other windows.
+        },
+
+        apprt.win32 => {
+            // Win32: release the WGL context from the renderer thread.
+            const w = @import("../apprt/win32/win32.zig");
+            _ = w.wglMakeCurrent(null, null);
         },
 
         apprt.embedded => {
@@ -258,9 +273,22 @@ pub fn drawFrameStart(self: *OpenGL) void {
 
 /// Actions taken after `drawFrame` is done.
 ///
-/// Right now there's nothing we need to do for OpenGL.
+/// On Win32, this is where we swap the front/back buffers.
 pub fn drawFrameEnd(self: *OpenGL) void {
     _ = self;
+
+    switch (apprt.runtime) {
+        apprt.win32 => {
+            // Swap the double-buffered surface after the frame is drawn.
+            // The WGL context is current on this thread, so we can get
+            // the associated DC and swap its buffers.
+            const w = @import("../apprt/win32/win32.zig");
+            if (w.wglGetCurrentDC()) |hdc| {
+                _ = w.SwapBuffers(hdc);
+            }
+        },
+        else => {},
+    }
 }
 
 pub fn initShaders(
