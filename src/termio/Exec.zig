@@ -1537,26 +1537,27 @@ fn execCommand(
             defer args.deinit(alloc);
 
             if (comptime builtin.os.tag == .windows) {
-                // We run our shell wrapped in `cmd.exe` so that we don't have
-                // to parse the command line ourselves if it has arguments.
+                // If the shell command contains spaces, it has arguments
+                // and we need cmd.exe /C to parse the command line. If it's
+                // a simple executable path with no arguments, run it directly
+                // to avoid cmd.exe /C <shell> which would exit immediately.
+                if (std.mem.indexOfScalar(u8, v, ' ') != null) {
+                    const windir = std.process.getEnvVarOwned(
+                        alloc,
+                        "WINDIR",
+                    ) catch |err| {
+                        log.warn("failed to get WINDIR, cannot run shell command err={}", .{err});
+                        return error.SystemError;
+                    };
+                    const cmd = try std.fs.path.joinZ(alloc, &[_][]const u8{
+                        windir,
+                        "System32",
+                        "cmd.exe",
+                    });
 
-                // Note we don't free any of the memory below since it is
-                // allocated in the arena.
-                const windir = std.process.getEnvVarOwned(
-                    alloc,
-                    "WINDIR",
-                ) catch |err| {
-                    log.warn("failed to get WINDIR, cannot run shell command err={}", .{err});
-                    return error.SystemError;
-                };
-                const cmd = try std.fs.path.joinZ(alloc, &[_][]const u8{
-                    windir,
-                    "System32",
-                    "cmd.exe",
-                });
-
-                try args.append(alloc, cmd);
-                try args.append(alloc, "/C");
+                    try args.append(alloc, cmd);
+                    try args.append(alloc, "/C");
+                }
             } else {
                 // We run our shell wrapped in `/bin/sh` so that we don't have
                 // to parse the command line ourselves if it has arguments.

@@ -221,12 +221,17 @@ fn startPosix(self: *Command, arena: Allocator) !void {
 }
 
 fn startWindows(self: *Command, arena: Allocator) !void {
-    const application_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, self.path);
     const cwd_w = if (self.cwd) |cwd| try std.unicode.utf8ToUtf16LeAllocZ(arena, cwd) else null;
+    // On Windows, pass null for lpApplicationName and put the full command
+    // in lpCommandLine. This makes CreateProcessW search PATH for the
+    // executable, which is the standard Windows pattern. Using a non-null
+    // lpApplicationName requires a fully qualified path.
     const command_line_w = if (self.args.len > 0) b: {
         const command_line = try windowsCreateCommandLine(arena, self.args);
         break :b try std.unicode.utf8ToUtf16LeAllocZ(arena, command_line);
-    } else null;
+    } else b: {
+        break :b try std.unicode.utf8ToUtf16LeAllocZ(arena, self.path);
+    };
     const env_w = if (self.env) |env_map| try createWindowsEnvBlock(arena, env_map) else null;
 
     const any_null_fd = self.stdin == null or self.stdout == null or self.stderr == null;
@@ -308,8 +313,8 @@ fn startWindows(self: *Command, arena: Allocator) !void {
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
     if (windows.exp.kernel32.CreateProcessW(
-        application_w.ptr,
-        if (command_line_w) |w| w.ptr else null,
+        null,
+        command_line_w.ptr,
         null,
         null,
         windows.TRUE,

@@ -29,6 +29,9 @@ hdc: ?w.HDC = null,
 /// The WGL OpenGL rendering context.
 hglrc: ?w.HGLRC = null,
 
+/// Background brush for the window (created from config background color).
+hbrush_bg: ?w.HBRUSH = null,
+
 /// Current size in pixels.
 width: u32 = 800,
 height: u32 = 600,
@@ -108,6 +111,19 @@ pub fn init(self: *Surface, app: *App) !void {
     );
     defer config.deinit();
 
+    // Create a background brush from the configured background color
+    const bg = config.background;
+    const colorref: w.COLORREF = w.RGB(bg.r, bg.g, bg.b);
+    self.hbrush_bg = w.CreateSolidBrush(colorref);
+
+    // Apply rounded corners (Windows 11+)
+    _ = w.DwmSetWindowAttribute(
+        hwnd,
+        w.DWMWA_WINDOW_CORNER_PREFERENCE,
+        &w.DWMWCP_ROUND,
+        @sizeOf(w.DWORD),
+    );
+
     // Initialize the core surface. This calls Renderer.surfaceInit()
     // which loads OpenGL via GLAD, so the WGL context must be current.
     try self.core_surface.init(
@@ -141,6 +157,10 @@ pub fn deinit(self: *Surface) void {
             _ = w.ReleaseDC(hwnd, hdc);
         }
         self.hdc = null;
+    }
+    if (self.hbrush_bg) |brush| {
+        _ = w.DeleteObject(@ptrCast(brush));
+        self.hbrush_bg = null;
     }
     if (self.hwnd) |hwnd| {
         _ = w.DestroyWindow(hwnd);
@@ -208,11 +228,59 @@ pub fn clipboardRequest(
     clipboard_type: apprt.Clipboard,
     state: apprt.ClipboardRequest,
 ) !bool {
-    _ = self;
-    _ = clipboard_type;
-    _ = state;
-    // TODO: Win32 clipboard read
-    return false;
+    _ = clipboard_type; // Win32 only supports standard clipboard
+
+    log.info("clipboardRequest called, state={}", .{state});
+
+    const hwnd = self.hwnd orelse return false;
+
+    // Open the clipboard
+    if (w.OpenClipboard(hwnd) == 0) {
+        log.warn("failed to open clipboard for read", .{});
+        return false;
+    }
+    defer _ = w.CloseClipboard();
+
+    // Check if clipboard contains text
+    const handle = w.GetClipboardData(w.CF_UNICODETEXT) orelse {
+        // Clipboard doesn't contain text, allow keybind to pass through
+        return false;
+    };
+
+    // Lock the clipboard data to get a pointer
+    const ptr = w.GlobalLock(handle) orelse {
+        log.warn("failed to lock clipboard data", .{});
+        return false;
+    };
+    defer _ = w.GlobalUnlock(handle);
+
+    // Convert UTF-16 to UTF-8
+    const utf16_ptr: [*:0]const u16 = @ptrCast(@alignCast(ptr));
+    const utf16_len = std.mem.indexOfSentinel(u16, 0, utf16_ptr);
+    const utf16_slice = utf16_ptr[0..utf16_len :0];
+
+    // Allocate buffer for UTF-8 conversion
+    const alloc = self.app.core_app.alloc;
+    const utf8_text = std.unicode.utf16LeToUtf8Alloc(alloc, utf16_slice) catch |err| {
+        log.warn("failed to convert clipboard text from UTF-16: {}", .{err});
+        return false;
+    };
+    defer alloc.free(utf8_text);
+
+    // Create null-terminated version for the callback
+    const utf8_text_z = alloc.dupeZ(u8, utf8_text) catch |err| {
+        log.warn("failed to allocate clipboard text: {}", .{err});
+        return false;
+    };
+    defer alloc.free(utf8_text_z);
+
+    // Complete the clipboard request via the core surface
+    self.core_surface.completeClipboardRequest(state, utf8_text_z, false) catch |err| {
+        log.warn("failed to complete clipboard request: {}", .{err});
+        return false;
+    };
+
+    return true;
 }
 
 pub fn setClipboard(
@@ -221,11 +289,74 @@ pub fn setClipboard(
     contents: []const apprt.ClipboardContent,
     confirm: bool,
 ) !void {
-    _ = self;
-    _ = clipboard_type;
-    _ = contents;
-    _ = confirm;
-    // TODO: Win32 clipboard write
+    _ = clipboard_type; // Win32 only supports standard clipboard
+    _ = confirm; // TODO: clipboard confirmation dialog
+
+    log.info("setClipboard called, {} content items", .{contents.len});
+
+    const hwnd = self.hwnd orelse return;
+
+    // Find the text/plain content
+    const text: [:0]const u8 = for (contents) |content| {
+        if (std.mem.eql(u8, content.mime, "text/plain")) {
+            break content.data;
+        }
+    } else return; // No text content to set
+
+    if (text.len == 0) return;
+
+    // Convert UTF-8 to UTF-16
+    const alloc = self.app.core_app.alloc;
+    const utf16_text = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch |err| {
+        log.warn("failed to convert clipboard text to UTF-16: {}", .{err});
+        return;
+    };
+    defer alloc.free(utf16_text);
+
+    // Calculate size needed (in bytes)
+    const size = utf16_text.len * @sizeOf(u16);
+
+    // Allocate global memory for clipboard
+    const handle = w.GlobalAlloc(w.GMEM_MOVEABLE, size) orelse {
+        log.warn("failed to allocate global memory for clipboard", .{});
+        return;
+    };
+    errdefer _ = w.GlobalFree(handle);
+
+    // Lock and copy data
+    const ptr = w.GlobalLock(handle) orelse {
+        log.warn("failed to lock global memory", .{});
+        _ = w.GlobalFree(handle);
+        return;
+    };
+
+    // Copy UTF-16 text to global memory
+    const dest: [*]u16 = @ptrCast(@alignCast(ptr));
+    @memcpy(dest[0..utf16_text.len], utf16_text);
+
+    _ = w.GlobalUnlock(handle);
+
+    // Open clipboard
+    if (w.OpenClipboard(hwnd) == 0) {
+        log.warn("failed to open clipboard for write", .{});
+        _ = w.GlobalFree(handle);
+        return;
+    }
+    defer _ = w.CloseClipboard();
+
+    // Empty clipboard and set new data
+    if (w.EmptyClipboard() == 0) {
+        log.warn("failed to empty clipboard", .{});
+        return;
+    }
+
+    if (w.SetClipboardData(w.CF_UNICODETEXT, handle) == null) {
+        log.warn("failed to set clipboard data", .{});
+        // Don't free handle here - clipboard owns it now if SetClipboardData succeeded partially
+        return;
+    }
+
+    // Clipboard now owns the handle, don't free it
 }
 
 pub fn defaultTermioEnv(self: *Surface) !std.process.EnvMap {
@@ -233,6 +364,8 @@ pub fn defaultTermioEnv(self: *Surface) !std.process.EnvMap {
     var env = std.process.EnvMap.init(std.heap.page_allocator);
     try env.put("TERM", "xterm-ghostty");
     try env.put("COLORTERM", "truecolor");
+    // Set a default prompt for cmd.exe that shows the current directory
+    try env.put("PROMPT", "$P$G");
     return env;
 }
 
@@ -347,7 +480,15 @@ pub fn wndProc(hwnd: w.HWND, msg: w.UINT, wparam: w.WPARAM, lparam: w.LPARAM) ca
         },
 
         w.WM_ERASEBKGND => {
-            // Prevent flickering - OpenGL handles all drawing
+            // Paint the background with the configured theme color to prevent
+            // white flashing before OpenGL renders the first frame
+            if (self.hbrush_bg) |brush| {
+                const hdc: w.HDC = @ptrFromInt(@as(usize, @intCast(wparam)));
+                var rect: w.RECT = .{};
+                if (w.GetClientRect(hwnd, &rect) != 0) {
+                    _ = w.FillRect(hdc, &rect, brush);
+                }
+            }
             return 1;
         },
 

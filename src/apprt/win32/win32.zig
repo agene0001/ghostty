@@ -23,7 +23,9 @@ pub const HWND = *opaque {};
 pub const HICON = *opaque {};
 pub const HCURSOR = *opaque {};
 pub const HBRUSH = *opaque {};
+pub const HGDIOBJ = *opaque {};
 pub const ATOM = u16;
+pub const COLORREF = DWORD;
 
 pub const TRUE: BOOL = 1;
 pub const FALSE: BOOL = 0;
@@ -228,6 +230,7 @@ pub extern "user32" fn EmptyClipboard() callconv(.winapi) BOOL;
 pub extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: c_int, dwNewLong: usize) callconv(.winapi) usize;
 pub extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: c_int) callconv(.winapi) usize;
 pub extern "user32" fn ValidateRect(hWnd: ?HWND, lpRect: ?*const RECT) callconv(.winapi) BOOL;
+pub extern "user32" fn FillRect(hDC: HDC, lprc: *const RECT, hbr: HBRUSH) callconv(.winapi) c_int;
 
 pub const GWLP_USERDATA: c_int = -21;
 
@@ -237,6 +240,8 @@ pub extern "gdi32" fn ReleaseDC(hWnd: ?HWND, hDC: HDC) callconv(.winapi) c_int;
 pub extern "gdi32" fn ChoosePixelFormat(hdc: HDC, ppfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) c_int;
 pub extern "gdi32" fn SetPixelFormat(hdc: HDC, format: c_int, ppfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) BOOL;
 pub extern "gdi32" fn SwapBuffers(hdc: HDC) callconv(.winapi) BOOL;
+pub extern "gdi32" fn CreateSolidBrush(color: COLORREF) callconv(.winapi) ?HBRUSH;
+pub extern "gdi32" fn DeleteObject(ho: HGDIOBJ) callconv(.winapi) BOOL;
 
 // ---- Extern functions: opengl32 (WGL) ----
 pub extern "opengl32" fn wglCreateContext(hdc: HDC) callconv(.winapi) ?HGLRC;
@@ -253,7 +258,28 @@ pub extern "kernel32" fn GlobalFree(hMem: HANDLE) callconv(.winapi) ?HANDLE;
 
 pub const GMEM_MOVEABLE: UINT = 0x0002;
 
+// ---- Extern functions: dwmapi (Desktop Window Manager) ----
+pub extern "dwmapi" fn DwmSetWindowAttribute(
+    hwnd: HWND,
+    dwAttribute: DWORD,
+    pvAttribute: *const anyopaque,
+    cbAttribute: DWORD,
+) callconv(.winapi) LONG;
+
+// DWM Window Attributes
+pub const DWMWA_WINDOW_CORNER_PREFERENCE: DWORD = 33;
+
+// Window corner preferences (Windows 11+)
+pub const DWMWCP_DEFAULT: DWORD = 0;
+pub const DWMWCP_DONOTROUND: DWORD = 1;
+pub const DWMWCP_ROUND: DWORD = 2;
+pub const DWMWCP_ROUNDSMALL: DWORD = 3;
+
 // ---- Helpers ----
+pub fn RGB(r: u8, g: u8, b: u8) COLORREF {
+    return @as(COLORREF, r) | (@as(COLORREF, g) << 8) | (@as(COLORREF, b) << 16);
+}
+
 pub fn loword(l: anytype) u16 {
     return @truncate(@as(u64, @bitCast(@as(i64, @intCast(l)))));
 }

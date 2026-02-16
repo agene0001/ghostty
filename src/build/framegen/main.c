@@ -1,23 +1,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <sys/stat.h>
 #include <errno.h>
 #include <zlib.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
 
 #define SEPARATOR '\x01'
 #define CHUNK_SIZE 16384
 
-static int filter_frames(const struct dirent *entry) {
-    const char *name = entry->d_name;
+static int filter_name(const char *name) {
     size_t len = strlen(name);
     return len > 4 && strcmp(name + len - 4, ".txt") == 0;
+}
+
+static int compare_strings(const void *a, const void *b) {
+    return strcmp(*(const char **)a, *(const char **)b);
+}
+
+#ifndef _WIN32
+static int filter_frames(const struct dirent *entry) {
+    return filter_name(entry->d_name);
 }
 
 static int compare_frames(const struct dirent **a, const struct dirent **b) {
     return strcmp((*a)->d_name, (*b)->d_name);
 }
+#endif
 
 static char *read_file(const char *path, size_t *out_size) {
     FILE *f = fopen(path, "rb");
@@ -54,12 +68,57 @@ int main(int argc, char **argv) {
     const char *frames_dir = argv[1];
     const char *output_file = argv[2];
 
+    int n = 0;
+    int names_cap = 64;
+    char **names = malloc(names_cap * sizeof(char*));
+    if (!names) {
+        fprintf(stderr, "Failed to allocate names array\n");
+        return 1;
+    }
+
+#ifdef _WIN32
+    char search_path[4096];
+    snprintf(search_path, sizeof(search_path), "%s\\*.txt", frames_dir);
+
+    WIN32_FIND_DATAA ffd;
+    HANDLE hFind = FindFirstFileA(search_path, &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "Failed to scan directory %s\n", frames_dir);
+        return 1;
+    }
+
+    do {
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (!filter_name(ffd.cFileName)) continue;
+
+        if (n >= names_cap) {
+            names_cap *= 2;
+            names = realloc(names, names_cap * sizeof(char*));
+        }
+        names[n] = _strdup(ffd.cFileName);
+        n++;
+    } while (FindNextFileA(hFind, &ffd) != 0);
+    FindClose(hFind);
+
+    qsort(names, n, sizeof(char*), compare_strings);
+#else
     struct dirent **namelist;
-    int n = scandir(frames_dir, &namelist, filter_frames, compare_frames);
+    n = scandir(frames_dir, &namelist, filter_frames, compare_frames);
     if (n < 0) {
         fprintf(stderr, "Failed to scan directory %s: %s\n", frames_dir, strerror(errno));
         return 1;
     }
+
+    for (int i = 0; i < n; i++) {
+        if (i >= names_cap) {
+            names_cap *= 2;
+            names = realloc(names, names_cap * sizeof(char*));
+        }
+        names[i] = strdup(namelist[i]->d_name);
+        free(namelist[i]);
+    }
+    free(namelist);
+#endif
 
     if (n == 0) {
         fprintf(stderr, "No frame files found in %s\n", frames_dir);
@@ -72,7 +131,7 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < n; i++) {
         char path[4096];
-        snprintf(path, sizeof(path), "%s/%s", frames_dir, namelist[i]->d_name);
+        snprintf(path, sizeof(path), "%s/%s", frames_dir, names[i]);
         
         frame_contents[i] = read_file(path, &frame_sizes[i]);
         if (!frame_contents[i]) {

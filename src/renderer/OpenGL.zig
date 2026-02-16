@@ -215,6 +215,11 @@ pub fn threadEnter(self: *const OpenGL, surface: *apprt.Surface) !void {
             // Win32: make the WGL context current on the renderer thread.
             // The main thread must have released it before this point.
             surface.makeContextCurrent();
+            // Reload GLAD on the renderer thread. On Windows,
+            // wglGetProcAddress returns context-specific function pointers,
+            // so GLAD must be reloaded after making the context current
+            // on a new thread.
+            try prepareContext(null);
         },
 
         apprt.embedded => {
